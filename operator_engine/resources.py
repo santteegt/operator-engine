@@ -3,10 +3,12 @@
 import json
 
 import kubernetes
+from kubernetes.client.exceptions import ApiException
 import yaml
 import kopf
 import psycopg2
 import os
+import re
 
 from constants import OperatorConfig, VolumeConfig, ExternalURLs
 
@@ -94,9 +96,31 @@ def create_configmap_workflow(body, logger):
     logger.info(f"{obj.kind} {obj.metadata.name} created")
 
 
+def create_service_job(body, port, logger):
+    with open("templates/service-template.yaml", 'r') as stream:
+        try:
+            service = yaml.safe_load(stream)
+        except yaml.YAMLError as exc:
+            print(exc)
+
+    service['metadata']['name'] = f"{OperatorConfig.SERVICE_JOB_PREFIX}-{body['metadata']['name']}"
+    service['metadata']['labels']['app'] = service['metadata']['name']
+    service['metadata']['namespace'] = body['metadata']['namespace']
+    service['spec']['selector']['app'] = body['metadata']['name']
+    service['spec']['ports'] = [{'port': port}]
+
+    logger.info(f"in create_service_job starting Service: {service}")
+
+    api = kubernetes.client.CoreV1Api()
+    obj = api.create_namespaced_service(
+        body['metadata']['namespace'], service)
+    logger.info(f"{obj.kind} {obj.metadata.name} created")
+
+
 def stop_specific_job(namespace, jobname, logger):
     logger.info(f"Trying to stop {jobname} in {namespace}")
     batch_client = kubernetes.client.BatchV1Api()
+    api = kubernetes.client.CoreV1Api()
     # int | The duration in seconds before the object should be deleted. Value must be non-negative integer. The value zero indicates delete immediately. If this value is nil, the default grace period for the specified type will be used. Defaults to a per object value if not specified. zero means delete immediately. (optional)
     grace_period_seconds = 0
     # str | Whether and how garbage collection will be performed. Either this field or OrphanDependents may be set, but not both. The default policy is decided by the existing finalizer set in the metadata.finalizers and the resource-specific default policy. Acceptable values are: 'Orphan' - orphan the dependents; 'Background' - allow the garbage collector to delete the dependents in the background; 'Foreground' - a cascading policy that deletes all dependents in the foreground. (optional)
@@ -104,7 +128,15 @@ def stop_specific_job(namespace, jobname, logger):
     try:
         api_response = batch_client.delete_namespaced_job(
             jobname, namespace, grace_period_seconds=grace_period_seconds, propagation_policy=propagation_policy)
-        logger.info(f"Got {api_response}")
+        logger.info(f"Stopped Job! Got {api_response}")
+
+        job_id_regex = re.compile(f"[\w\d]+(?=-{OperatorConfig.ALGORITHM_JOB_SUFFIX})")
+
+        job_id = job_id_regex.findall(jobname)[0]
+
+        api_response = api.delete_namespaced_service(
+            f"{OperatorConfig.SERVICE_JOB_PREFIX}-{job_id}", namespace, grace_period_seconds=grace_period_seconds, propagation_policy=propagation_policy)
+        logger.info(f"Stopped Service! Got {api_response}")
     except ApiException as e:
         logger.error(
             f'Exception when calling CustomObjectsApi->delete_namespaced_custom_object: {e}')
@@ -190,11 +222,13 @@ def create_configure_job(body, logger):
     logger.info(f"{obj.kind} {obj.metadata.name} created")
 
 
-def create_algorithm_job(body, logger, resources):
+def create_algorithm_job(body, logger, resources, env_vars=[]):
     metadata = body['spec']['metadata']
     logger.info(f"create_algorithm_job:{metadata}")
     # attributes = metadata['service'][0]['attributes']
-    with open("templates/job-template.yaml", 'r') as stream:
+    # TODO: using a custom template should be dynamically set
+    # with open("templates/job-template.yaml", 'r') as stream:
+    with open("templates/pygrid-job-template.yaml", 'r') as stream:
         try:
             job = yaml.safe_load(stream)
         except yaml.YAMLError as exc:
@@ -204,11 +238,12 @@ def create_algorithm_job(body, logger, resources):
     job['metadata']['labels']['workflow'] = body['metadata']['labels']['workflow']
     job['metadata']['labels']['component'] = 'algorithm'
 
-    job['metadata']['name'] = f"{body['metadata']['name']}-algorithm-job"
+    job['metadata']['name'] = f"{body['metadata']['name']}-{OperatorConfig.ALGORITHM_JOB_SUFFIX}"
     job['metadata']['namespace'] = body['metadata']['namespace']
 
     job['spec']['template']['metadata']['labels']['workflow'] = body['metadata']['labels']['workflow']
     job['spec']['template']['metadata']['labels']['component'] = 'algorithm'
+    job['spec']['template']['metadata']['labels']['app'] = job['metadata']['labels']['app']
 
     #job['spec']['template']['spec']['containers'][0]['command'] = ['sh', '-c', OperatorConfig.POD_ALGORITHM_INIT_SCRIPT]
     command = OperatorConfig.POD_ALGORITHM_INIT_SCRIPT
@@ -235,6 +270,24 @@ def create_algorithm_job(body, logger, resources):
                                                                     'value': dids})
     job['spec']['template']['spec']['containers'][0]['env'].append({'name': 'TRANSFORMATION_DID',
                                                                     'value': env_transformation})
+    #################
+    # CUSTOM ENV VARS
+    job['spec']['template']['spec']['containers'][0]['env'].append({'name': 'NODE_ID',
+                                                                    'value': body['metadata']['name']})
+    # TODO: add domain as env var
+    # job['spec']['template']['spec']['containers'][0]['env'].append({'name': 'ADDRESS',
+    #                                                                 'value': f"http://service-{job['metadata']['labels']['app']}.{job['metadata']['namespace']}.svc.cluster.local:5001/"})
+    # job['spec']['template']['spec']['containers'][0]['env'].append({'name': 'PORT',
+    #                                                                 'value': '5001'})
+    # TODO: get grid network node URI from env var
+    job['spec']['template']['spec']['containers'][0]['env'].append({'name': 'NETWORK',
+                                                                    'value': 'http://pygrid-network.ocean-compute.svc.cluster.local:7000'})
+    # job['spec']['template']['spec']['containers'][0]['env'].append({'name': 'DATABASE_URL',
+    #                                                                 'value': 'sqlite:///databasenode.db'})
+    for var in env_vars:
+        job['spec']['template']['spec']['containers'][0]['env'].append({'name': var['name'], 'value': var['value']})
+    #################
+    #################
     job['spec']['template']['spec']['containers'][0]['env'].append({'name': 'VOLUME',
                                                                     'value': '/data'})
     job['spec']['template']['spec']['containers'][0]['env'].append({'name': 'LOGS',
@@ -594,6 +647,34 @@ def update_sql_job_status(jobId, status, logger):
 
 def get_sql_job_status(jobId, logger):
     logger.error(f"Start get_sql_job_status for {jobId}")
+    connection = getpgconn()
+    try:
+        cursor = connection.cursor()
+        params = dict()
+        select_query = "SELECT status FROM jobs WHERE workflowId=%(jobId)s LIMIT 1"
+        params['jobId'] = jobId
+        logger.info(f'Got select_query: {select_query}')
+        logger.info(f'Got params: {params}')
+        cursor.execute(select_query, params)
+        returnstatus = -1
+        while True:
+            row = cursor.fetchone()
+            if row == None:
+                break
+            returnstatus = row[0]
+    except (Exception, psycopg2.Error) as error:
+        logger.error(f'Got PG error in get_sql_job_status: {error}')
+    finally:
+        # closing database connection.
+        if(connection):
+            cursor.close()
+            connection.close()
+    logger.error(f'get_sql_job_status goes back with  {returnstatus}')
+    return returnstatus
+
+
+def get_sql_job(jobId, logger):
+    logger.error(f"Start get_sql_job_ for {jobId}")
     connection = getpgconn()
     try:
         cursor = connection.cursor()

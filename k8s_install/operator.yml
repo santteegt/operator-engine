@@ -70,8 +70,10 @@ spec:
             configMapKeyRef:
               key: POSTGRES_PORT
               name: postgres-config
-        image: oceanprotocol/operator-engine:latest
-        imagePullPolicy: Always
+        # image: oceanprotocol/operator-engine:latest
+        # imagePullPolicy: Always
+        image: santteegt/operator-engine:dev
+        imagePullPolicy: "IfNotPresent"
         name: ocean-compute-operator
         resources: {}
         terminationMessagePath: /dev/termination-log

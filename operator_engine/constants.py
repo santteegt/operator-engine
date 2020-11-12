@@ -4,6 +4,8 @@ from os import getenv
 
 
 class OperatorConfig:
+    ALGORITHM_JOB_SUFFIX = 'algorithm-job'
+    SERVICE_JOB_PREFIX = 'service'
     NETWORK = getenv('NETWORK', 'pacific')
     ACCOUNT_JSON = getenv('ACCOUNT_JSON')
     ACCOUNT_PASSWORD = getenv('ACCOUNT_PASSWORD')

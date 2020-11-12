@@ -21,7 +21,20 @@ spec:
         imagePullPolicy: "IfNotPresent"
         name: "workflow-executor"
         resources: {}
-        env: []
+        env:
+        # - name: NODE_ID
+        #   value: ""
+        # - name: ADDRESS
+        #   value: ""
+        - name: PORT
+          value: "5001"
+        # - name: NETWORK
+        #   value: ""
+        - name: DATABASE_URL
+          value: "sqlite:///databasenode.db"
+        ports:
+        - containerPort: 5001
+          protocol: TCP
       dnsPolicy: ClusterFirst
       restartPolicy: OnFailure
       schedulerName: default-scheduler

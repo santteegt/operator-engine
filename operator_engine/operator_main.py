@@ -3,6 +3,7 @@
 import asyncio
 import threading
 import logging
+import random
 import time
 
 import kopf
@@ -64,7 +65,24 @@ def create_workflow(**kwargs):
     
     # Algorithm job
     update_sql_job_status(body['metadata']['name'],40,logger)
-    create_algorithm_job(body, logger, body['spec']['metadata']['stages'][0]['compute']['resources'])
+    service_port = random.choice(range(5000, 6000))
+    # TODO: Env vars should be dinamically set from the outside but controlled by the provider
+    env_vars = [{
+        'name': 'PORT',
+        'value': str(service_port)
+    },
+    {
+        'name': 'ADDRESS',
+        'value': f"http://service-{body['metadata']['name']}.{body['metadata']['namespace']}.svc.cluster.local:{service_port}/"
+        # 'value': f"http://0.0.0.0:{service_port}/"
+    }
+    ]
+    create_algorithm_job(body, logger, body['spec']['metadata']['stages'][0]['compute']['resources'], env_vars)
+    # TODOs: 
+    # - make it conditional
+    # - should be publicly available on a Cloud cluster
+    create_service_job(body, service_port, logger)
+    ##
     starttime=int(time.time())
     # Wait configure pod to finish
     while not wait_finish_job(body['metadata']['namespace'], f"{body['metadata']['name']}-algorithm-job"):
